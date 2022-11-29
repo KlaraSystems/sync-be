@@ -1,0 +1,133 @@
+#!/bin/sh
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Copyright (c) 2022 Klara Inc.
+# Copyright (c) 2022 Rob Wing <rob.wing@klarasystems.com>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+
+if [ -z "$1" -o -z "$2" ]; then
+    echo "usage: $(basename $0) <new_bootenv> <bootenv_config>"
+    exit 1
+fi
+
+BENAME=$1
+BECONF=$2
+OLDMP=
+NEWMP=
+
+[ "${BECONF#/}" = "${BECONF}" ] && \
+    BECONF="$(pwd)/${BECONF}"
+
+if [ ! -f "$BECONF" ]; then
+    echo "error: $BECONF is not a file, exiting"
+    exit 1
+fi
+
+echo "using config file: $BECONF"
+
+sync() {
+    _pwd=$(pwd)
+
+    cd $OLDMP
+    cat $BECONF | while read glob; do
+
+        # force relative paths from config file
+        glob=${glob#/}
+        find $glob -quit 2> /dev/null || continue
+
+        for file in $glob; do
+            # overwrite directory in the new boot environment
+            if [ -d "$file" ] && [ -d $NEWMP/$file ]; then
+                if ! rm -rf $NEWMP/$file; then
+                    echo "error: unable to remove $NEWMP/$file, exiting.."
+                    exit 1
+                fi
+            elif [ -f "$file" ]; then
+                # make sure directory exists where file is being installed
+                dir=$(dirname $NEWMP/$file)
+                [ ! -d "$dir" ] && mkdir -p $dir
+            fi
+
+            echo "copying $file to $NEWMP/$file"
+            if ! cp -fa $file $NEWMP/$file; then
+                echo "error: failed to copy, exiting!"
+                exit 1
+            fi
+        done
+
+    done;
+
+    cd ${_pwd}
+}
+
+cleanup() {
+    umount $NEWMP
+    rmdir $NEWMP
+}
+
+# use the dataset that is being booted from
+ROOTFS=`mount -p | awk '$2 == "/" && $3 == "zfs" { print $1 }'`
+if [ -z "$ROOTFS" ]; then
+    echo "error: zfs is not on root"
+    exit 1
+fi
+
+# sanity check between booted root fs and bootfs
+zpool="${ROOTFS%%/*}"
+BOOTFS=`zpool get -H -o value bootfs ${zpool}| awk '$0 != "-" { print $0 }'`
+if [ "$ROOTFS" != "$BOOTFS" ]; then
+    echo "WARNING:  ZFS on rootfs doesn't match bootfs, continuing.."
+    echo "          bootfs=$BOOTFS, rootfs=$ROOTFS"
+fi
+
+
+BEPATH="$(dirname $ROOTFS)/$BENAME"
+if ! zfs recv -Fuv $BEPATH; then
+    echo "error: zfs receive failed, exiting!"
+    exit 1
+fi
+
+OLDMP="/"
+NEWMP=`mktemp -d -t klara`
+if [ $? -ne 0 ]; then
+    echo "error: failed to create temporary mountpoint"
+    exit 1
+fi
+
+if ! mount -t zfs $BEPATH $NEWMP; then
+    echo "error: failed to mount $BEPATH at $NEWMP"
+    exit 1
+fi
+
+if ! sync; then
+    cleanup
+fi
+
+if ! zfsbootcfg "zfs:$BEPATH:"; then
+    echo "error: setting $BEPATH for nextboot failed"
+else
+    echo "ready for reboot!"
+fi
+
+cleanup
