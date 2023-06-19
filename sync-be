@@ -35,6 +35,7 @@ BENAME=$1
 BECONF=$2
 OLDMP=
 NEWMP=
+UDATE=`date -u +%Y%m%d-%H%M`
 
 [ "${BECONF#/}" = "${BECONF}" ] && \
     BECONF="$(pwd)/${BECONF}"
@@ -50,7 +51,7 @@ sync() {
     _pwd=$(pwd)
 
     cd $OLDMP
-    cat $BECONF | while read glob; do
+    egrep -v '^#' $BECONF | while read glob; do
 
         # force relative paths from config file
         glob=${glob#/}
@@ -70,7 +71,7 @@ sync() {
             fi
 
             echo "copying $file to $NEWMP/$file"
-            if ! cp -fa $file $NEWMP/$file; then
+            if ! cp -vfa $file $NEWMP/$file; then
                 echo "error: failed to copy, exiting!"
                 exit 1
             fi
@@ -122,6 +123,16 @@ fi
 
 if ! sync; then
     cleanup
+fi
+
+if ! zfs snapshot $BOOTFS@syncbe:$UDATE; then
+    echo "error: failed to create $BOOTFS@syncbe:$UDATE snapshot"
+    exit 1
+fi
+
+if ! zfs snapshot $BEPATH@syncbe:$UDATE; then
+    echo "error: failed to create $BEPATH@syncbe:$UDATE snapshot"
+    exit 1
 fi
 
 if ! zfsbootcfg "zfs:$BEPATH:"; then
